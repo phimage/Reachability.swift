@@ -42,9 +42,9 @@ func callback(reachability:SCNetworkReachability, flags: SCNetworkReachabilityFl
     guard let info = info else { return }
     
     let reachability = Unmanaged<Reachability>.fromOpaque(info).takeUnretainedValue()
-
-    DispatchQueue.main.async { 
-        reachability.reachabilityChanged()
+    
+    DispatchQueue.main.async {
+        reachability.reachabilityChanged(Reachability.Flags(flags))
     }
 }
 
@@ -83,16 +83,16 @@ public class Reachability {
         if isReachableViaWiFi {
             return .reachableViaWiFi
         }
-        if isRunningOnDevice {
+        if Reachability.isRunningOnDevice {
             return .reachableViaWWAN
         }
         
         return .notReachable
     }
     
-    fileprivate var previousFlags: SCNetworkReachabilityFlags?
+    fileprivate var previousFlags: Reachability.Flags?
     
-    fileprivate var isRunningOnDevice: Bool = {
+    fileprivate static var isRunningOnDevice: Bool = {
         #if (arch(i386) || arch(x86_64)) && os(iOS)
             return false
         #else
@@ -174,17 +174,31 @@ public extension Reachability {
         SCNetworkReachabilitySetDispatchQueue(reachabilityRef, nil)
     }
     
+    // MARK: Flags
+    class Flags {
+        
+        open var reachabilityFlags: SCNetworkReachabilityFlags
+        
+        fileprivate init(_ reachabilityFlags: SCNetworkReachabilityFlags) {
+            self.reachabilityFlags = reachabilityFlags
+        }
+    }
+
+    var flags: Flags {
+        return Flags(scNetworkReachabilityFlags)
+    }
+
     // MARK: - *** Connection test methods ***
     var isReachable: Bool {
+        let flags = self.flags
+        guard flags.isReachableFlagSet else { return false }
         
-        guard isReachableFlagSet else { return false }
-        
-        if isConnectionRequiredAndTransientFlagSet {
+        if flags.isConnectionRequiredAndTransientFlagSet {
             return false
         }
         
-        if isRunningOnDevice {
-            if isOnWWANFlagSet && !reachableOnWWAN {
+        if Reachability.isRunningOnDevice {
+            if flags.isOnWWANFlagSet && !reachableOnWWAN {
                 // We don't want to connect when on 3G.
                 return false
             }
@@ -195,42 +209,37 @@ public extension Reachability {
     
     var isReachableViaWWAN: Bool {
         // Check we're not on the simulator, we're REACHABLE and check we're on WWAN
-        return isRunningOnDevice && isReachableFlagSet && isOnWWANFlagSet
+        let flags = self.flags
+        return Reachability.isRunningOnDevice && flags.isReachableFlagSet && flags.isOnWWANFlagSet
     }
     
     var isReachableViaWiFi: Bool {
+        let flags = self.flags
         
         // Check we're reachable
-        guard isReachableFlagSet else { return false }
+        guard flags.isReachableFlagSet else { return false }
         
         // If reachable we're reachable, but not on an iOS device (i.e. simulator), we must be on WiFi
-        guard isRunningOnDevice else { return true }
+        guard Reachability.isRunningOnDevice else { return true }
         
         // Check we're NOT on WWAN
-        return !isOnWWANFlagSet
+        return !flags.isOnWWANFlagSet
     }
     
-    var description: String {
-        
-        let W = isRunningOnDevice ? (isOnWWANFlagSet ? "W" : "-") : "X"
-        let R = isReachableFlagSet ? "R" : "-"
-        let c = isConnectionRequiredFlagSet ? "c" : "-"
-        let t = isTransientConnectionFlagSet ? "t" : "-"
-        let i = isInterventionRequiredFlagSet ? "i" : "-"
-        let C = isConnectionOnTrafficFlagSet ? "C" : "-"
-        let D = isConnectionOnDemandFlagSet ? "D" : "-"
-        let l = isLocalAddressFlagSet ? "l" : "-"
-        let d = isDirectFlagSet ? "d" : "-"
-        
-        return "\(W)\(R) \(c)\(t)\(i)\(C)\(D)\(l)\(d)"
+}
+
+extension Reachability: CustomStringConvertible {
+    
+    public var description: String {
+        return self.flags.description
     }
 }
 
 fileprivate extension Reachability {
     
-    func reachabilityChanged() {
+    func reachabilityChanged(_ f: Reachability.Flags? = nil) {
         
-        let flags = reachabilityFlags
+        let flags = f ?? self.flags
         
         guard previousFlags != flags else { return }
         
@@ -242,6 +251,26 @@ fileprivate extension Reachability {
         previousFlags = flags
     }
     
+    var scNetworkReachabilityFlags: SCNetworkReachabilityFlags {
+        
+        guard let reachabilityRef = reachabilityRef else { return SCNetworkReachabilityFlags() }
+        
+        var flags = SCNetworkReachabilityFlags()
+        let gotFlags = withUnsafeMutablePointer(to: &flags) {
+            SCNetworkReachabilityGetFlags(reachabilityRef, UnsafeMutablePointer($0))
+        }
+        
+        if gotFlags {
+            return flags
+        } else {
+            return SCNetworkReachabilityFlags()
+        }
+    }
+
+}
+
+extension Reachability.Flags {
+
     var isOnWWANFlagSet: Bool {
         #if os(iOS)
             return reachabilityFlags.contains(.isWWAN)
@@ -279,20 +308,29 @@ fileprivate extension Reachability {
     var isConnectionRequiredAndTransientFlagSet: Bool {
         return reachabilityFlags.intersection([.connectionRequired, .transientConnection]) == [.connectionRequired, .transientConnection]
     }
+}
+extension Reachability.Flags: Equatable {
     
-    var reachabilityFlags: SCNetworkReachabilityFlags {
+    public static func ==(lhs: Reachability.Flags, rhs: Reachability.Flags) -> Bool {
+        return lhs.reachabilityFlags == rhs.reachabilityFlags
+    }
+    
+}
+
+extension Reachability.Flags: CustomStringConvertible {
+    
+    public var description: String {
         
-        guard let reachabilityRef = reachabilityRef else { return SCNetworkReachabilityFlags() }
+        let W = Reachability.isRunningOnDevice ? (isOnWWANFlagSet ? "W" : "-") : "X"
+        let R = isReachableFlagSet ? "R" : "-"
+        let c = isConnectionRequiredFlagSet ? "c" : "-"
+        let t = isTransientConnectionFlagSet ? "t" : "-"
+        let i = isInterventionRequiredFlagSet ? "i" : "-"
+        let C = isConnectionOnTrafficFlagSet ? "C" : "-"
+        let D = isConnectionOnDemandFlagSet ? "D" : "-"
+        let l = isLocalAddressFlagSet ? "l" : "-"
+        let d = isDirectFlagSet ? "d" : "-"
         
-        var flags = SCNetworkReachabilityFlags()
-        let gotFlags = withUnsafeMutablePointer(to: &flags) {
-            SCNetworkReachabilityGetFlags(reachabilityRef, UnsafeMutablePointer($0))
-        }
-        
-        if gotFlags {
-            return flags
-        } else {
-            return SCNetworkReachabilityFlags()
-        }
+        return "\(W)\(R) \(c)\(t)\(i)\(C)\(D)\(l)\(d)"
     }
 }
